@@ -14,6 +14,9 @@ const { testConnection } = require('./services/database');
 
 const app = express();
 
+// Trust proxy for accurate IP detection (needed for rate limiting behind proxies)
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(helmet()); // security headers
 app.use(compression()); // gzip responses
