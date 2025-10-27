@@ -1,8 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/database');
+const razorpayInstance = require('../config/razorpay');
 
 // Registration endpoint (POST /registration)
+/*{
+{
+  "teamName": "string",
+  "domain": "string",
+  "members": [
+    {
+      "name": "string",
+      "email": "string",
+      "phone": "string",
+      "college": "string",
+      "role": "Team Lead" | "Member"
+    },
+    // ... more members (up to team size)
+  ]
+}
+}*/
 router.post('/', async (req, res) => {
   const { teamName, domain, members } = req.body;
   
@@ -114,11 +131,49 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Start transaction
+    // Calculate total amount
+    const chargePerMember = parseInt(process.env.REGISTRATION_CHARGE_PER_MEMBER || 100);
+    const totalAmountInRupees = members.length * chargePerMember;
+    const totalAmountInPaise = totalAmountInRupees * 100;
+
+    // Create Razorpay order
+    if (!razorpayInstance) {
+      return res.status(500).json({
+        success: false,
+        message: 'Payment gateway not initialized. Check server configuration.',
+      });
+    }
+
+    let razorpayOrder;
+    try {
+      razorpayOrder = await razorpayInstance.orders.create({
+        amount: totalAmountInPaise,
+        currency: 'INR',
+        receipt: `team_${teamName}_${Date.now()}`,
+        payment_capture: 1, // auto-capture
+      });
+    } catch (razorpayError) {
+      console.error('Razorpay order creation error:', razorpayError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create payment order',
+        error: process.env.NODE_ENV === 'development' ? razorpayError.message : undefined,
+      });
+    }
+
+    // Create team with 'Initiated' payment status
     const { data: newTeam, error: insertTeamError } = await supabase
       .from('teams')
       .insert([
-        { team_name: teamName, domain: domain }
+        {
+          team_name: teamName,
+          domain: domain,
+          team_size: members.length,
+          razorpay_order_id: razorpayOrder.id,
+          amount_in_paise: totalAmountInPaise,
+          payment_status: 'Initiated',
+          payment_initiated_at: new Date().toISOString(),
+        }
       ])
       .select()
       .single();
@@ -126,31 +181,23 @@ router.post('/', async (req, res) => {
     if (insertTeamError) throw insertTeamError;
     const teamId = newTeam.id;
 
-    // Prepare member data
-    const memberData = members.map(member => ({
-      team_id: teamId,
-      name: member.name,
-      email: member.email,
-      phone: member.phone,
-      college: member.college,
-      role: member.role
-    }));
-
-    // Insert all members in a single batch
-    const { error: membersInsertError } = await supabase
-      .from('registrations')
-      .insert(memberData);
-
-    if (membersInsertError) throw membersInsertError;
-
+    // Return payment order details to frontend
+    // Frontend will complete payment and then call /razorpay/verify endpoint
     res.status(201).json({
       success: true,
-      message: 'Team registration successful',
+      message: 'Payment order created. Please complete payment to finalize registration.',
       data: {
         teamId,
         teamName,
         domain,
         memberCount: members.length,
+        paymentDetails: {
+          orderId: razorpayOrder.id,
+          amount: totalAmountInRupees,
+          amountInPaise: totalAmountInPaise,
+          currency: 'INR',
+          chargePerMember: chargePerMember,
+        },
       },
     });
   } catch (error) {
