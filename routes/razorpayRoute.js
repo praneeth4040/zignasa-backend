@@ -48,10 +48,28 @@ router.post('/create-order', async (req, res) => {
 // Body: { teamId: number, razorpayPaymentId: string, razorpayOrderId: string, razorpaySignature: string, members: [...] }
 router.post('/verify-payment', async (req, res) => {
 	try {
+		console.log('=== Verify Payment Route Called ===');
+		console.log('Request Body:', JSON.stringify(req.body, null, 2));
+		console.log('Request Headers:', JSON.stringify(req.headers, null, 2));
+
 		const { teamId, razorpayPaymentId, razorpayOrderId, razorpaySignature, members } = req.body;
+
+		console.log('Extracted Data:', {
+			teamId,
+			razorpayPaymentId,
+			razorpayOrderId,
+			razorpaySignature: razorpaySignature ? `${razorpaySignature.substring(0, 10)}...` : 'missing',
+			membersCount: members?.length,
+		});
 
 		// Validate required fields
 		if (!teamId || !razorpayPaymentId || !razorpayOrderId || !razorpaySignature) {
+			console.error('Validation Error: Missing required fields', {
+				hasTeamId: !!teamId,
+				hasRazorpayPaymentId: !!razorpayPaymentId,
+				hasRazorpayOrderId: !!razorpayOrderId,
+				hasRazorpaySignature: !!razorpaySignature,
+			});
 			return res.status(400).json({
 				success: false,
 				message: 'Missing required payment verification fields',
@@ -59,34 +77,74 @@ router.post('/verify-payment', async (req, res) => {
 		}
 
 		if (!Array.isArray(members) || members.length === 0) {
+			console.error('Validation Error: Invalid members array', {
+				isArray: Array.isArray(members),
+				length: members?.length,
+				members: members,
+			});
 			return res.status(400).json({
 				success: false,
 				message: 'Members array is required',
 			});
 		}
 
+		console.log('All validations passed');
+
 		// Verify signature
 		const body = razorpayOrderId + '|' + razorpayPaymentId;
+		console.log('Signature Verification:', {
+			body,
+			receivedSignature: razorpaySignature.substring(0, 20) + '...',
+		});
+
 		const expectedSignature = crypto
 			.createHmac('sha256', process.env.RAZORPAY_SECRET)
 			.update(body)
 			.digest('hex');
 
+		console.log('Signature Comparison:', {
+			expected: expectedSignature.substring(0, 20) + '...',
+			received: razorpaySignature.substring(0, 20) + '...',
+			match: expectedSignature === razorpaySignature,
+		});
+
 		if (expectedSignature !== razorpaySignature) {
+			console.error('Signature Mismatch Error:', {
+				expectedSignature: expectedSignature.substring(0, 30) + '...',
+				receivedSignature: razorpaySignature.substring(0, 30) + '...',
+				fullMatch: expectedSignature === razorpaySignature,
+			});
 			return res.status(400).json({
 				success: false,
 				message: 'Invalid payment signature. Possible fraud attempt.',
 			});
 		}
 
+		console.log('Signature verified successfully');
+
 		// Get team data to verify
+		console.log('Fetching team data for teamId:', teamId);
 		const { data: team, error: teamError } = await supabase
 			.from('teams')
 			.select('*')
 			.eq('id', teamId)
 			.single();
 
+		console.log('Team Fetch Result:', {
+			teamFound: !!team,
+			teamError: teamError ? JSON.stringify(teamError, null, 2) : null,
+			teamData: team ? {
+				id: team.id,
+				payment_status: team.payment_status,
+				razorpay_order_id: team.razorpay_order_id,
+			} : null,
+		});
+
 		if (teamError || !team) {
+			console.error('Team Fetch Error:', {
+				error: teamError,
+				teamExists: !!team,
+			});
 			return res.status(404).json({
 				success: false,
 				message: 'Team not found',
@@ -94,7 +152,17 @@ router.post('/verify-payment', async (req, res) => {
 		}
 
 		// Verify payment status is 'Initiated'
+		console.log('Checking payment status:', {
+			currentStatus: team.payment_status,
+			expectedStatus: 'Initiated',
+			match: team.payment_status === 'Initiated',
+		});
+
 		if (team.payment_status !== 'Initiated') {
+			console.error('Payment Status Error:', {
+				currentStatus: team.payment_status,
+				expectedStatus: 'Initiated',
+			});
 			return res.status(400).json({
 				success: false,
 				message: 'Team payment is not in Initiated state',
@@ -102,24 +170,51 @@ router.post('/verify-payment', async (req, res) => {
 		}
 
 		// Verify order IDs match
+		console.log('Verifying order IDs:', {
+			teamOrderId: team.razorpay_order_id,
+			receivedOrderId: razorpayOrderId,
+			match: team.razorpay_order_id === razorpayOrderId,
+		});
+
 		if (team.razorpay_order_id !== razorpayOrderId) {
+			console.error('Order ID Mismatch Error:', {
+				teamOrderId: team.razorpay_order_id,
+				receivedOrderId: razorpayOrderId,
+			});
 			return res.status(400).json({
 				success: false,
 				message: 'Order ID mismatch',
 			});
 		}
 
-		// Update team with payment completion details
-		const { error: updateTeamError } = await supabase
-			.from('teams')
-			.update({
-				payment_status: 'Completed',
-				razorpay_payment_id: razorpayPaymentId,
-				payment_verified_at: new Date().toISOString(),
-			})
-			.eq('id', teamId);
+		console.log('All verifications passed, updating team...');
 
-		if (updateTeamError) throw updateTeamError;
+		// Update team with payment completion details
+		const updateData = {
+			payment_status: 'Completed',
+			razorpay_payment_id: razorpayPaymentId,
+			payment_verified_at: new Date().toISOString(),
+		};
+
+		console.log('Updating team with data:', updateData);
+
+		const { error: updateTeamError, data: updatedTeam } = await supabase
+			.from('teams')
+			.update(updateData)
+			.eq('id', teamId)
+			.select();
+
+		console.log('Team Update Result:', {
+			updateError: updateTeamError ? JSON.stringify(updateTeamError, null, 2) : null,
+			updatedTeam: updatedTeam,
+		});
+
+		if (updateTeamError) {
+			console.error('Team Update Error:', JSON.stringify(updateTeamError, null, 2));
+			throw updateTeamError;
+		}
+
+		console.log('Team updated successfully');
 
 		// Prepare and insert member data
 		const memberData = members.map(member => ({
@@ -131,11 +226,29 @@ router.post('/verify-payment', async (req, res) => {
 			role: member.role,
 		}));
 
-		const { error: membersInsertError } = await supabase
-			.from('registrations')
-			.insert(memberData);
+		console.log('Preparing to insert members:', {
+			memberCount: memberData.length,
+			memberData: memberData,
+		});
 
-		if (membersInsertError) throw membersInsertError;
+		const { error: membersInsertError, data: insertedMembers } = await supabase
+			.from('registrations')
+			.insert(memberData)
+			.select();
+
+		console.log('Members Insert Result:', {
+			insertError: membersInsertError ? JSON.stringify(membersInsertError, null, 2) : null,
+			insertedCount: insertedMembers?.length,
+			insertedMembers: insertedMembers,
+		});
+
+		if (membersInsertError) {
+			console.error('Members Insert Error:', JSON.stringify(membersInsertError, null, 2));
+			throw membersInsertError;
+		}
+
+		console.log('All operations completed successfully');
+		console.log('=== Verify Payment Route Success ===');
 
 		res.status(200).json({
 			success: true,
@@ -149,7 +262,14 @@ router.post('/verify-payment', async (req, res) => {
 			},
 		});
 	} catch (error) {
-		console.error('Payment verification error:', error);
+		console.error('=== Payment Verification Error ===');
+		console.error('Error Type:', error.constructor.name);
+		console.error('Error Message:', error.message);
+		console.error('Error Stack:', error.stack);
+		console.error('Full Error Object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+		console.error('Request Body at Error:', JSON.stringify(req.body, null, 2));
+		console.error('=== End Error Log ===');
+
 		res.status(500).json({
 			success: false,
 			message: 'An error occurred during payment verification',
