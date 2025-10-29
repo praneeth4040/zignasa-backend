@@ -88,6 +88,19 @@ router.post('/verify-payment', async (req, res) => {
 			});
 		}
 
+		// Validate each member has rollNumber (support snake_case)
+		for (let i = 0; i < members.length; i++) {
+			const m = members[i];
+			if (!m.rollNumber && m.roll_number) m.rollNumber = m.roll_number;
+			if (!m.rollNumber) {
+				console.error('Validation Error: Missing rollNumber for member', { index: i, member: m });
+				return res.status(400).json({
+					success: false,
+					message: `Member ${i + 1} is missing rollNumber`,
+				});
+			}
+		}
+
 		console.log('All validations passed');
 
 		// Verify signature
@@ -151,23 +164,12 @@ router.post('/verify-payment', async (req, res) => {
 			});
 		}
 
-		// Verify payment status is 'Initiated'
+		// Verify payment status is 'Initiated' (log only; enforce atomically below)
 		console.log('Checking payment status:', {
 			currentStatus: team.payment_status,
 			expectedStatus: 'Initiated',
 			match: team.payment_status === 'Initiated',
 		});
-
-		if (team.payment_status !== 'Initiated') {
-			console.error('Payment Status Error:', {
-				currentStatus: team.payment_status,
-				expectedStatus: 'Initiated',
-			});
-			return res.status(400).json({
-				success: false,
-				message: 'Team payment is not in Initiated state',
-			});
-		}
 
 		// Verify order IDs match
 		console.log('Verifying order IDs:', {
@@ -187,7 +189,7 @@ router.post('/verify-payment', async (req, res) => {
 			});
 		}
 
-		console.log('All verifications passed, updating team...');
+		console.log('All verifications passed, updating team atomically...');
 
 		// Update team with payment completion details
 		const updateData = {
@@ -202,16 +204,26 @@ router.post('/verify-payment', async (req, res) => {
 			.from('teams')
 			.update(updateData)
 			.eq('id', teamId)
+			.eq('payment_status', 'Initiated')
 			.select();
 
 		console.log('Team Update Result:', {
 			updateError: updateTeamError ? JSON.stringify(updateTeamError, null, 2) : null,
-			updatedTeam: updatedTeam,
+			updatedRows: updatedTeam?.length || 0,
 		});
 
 		if (updateTeamError) {
 			console.error('Team Update Error:', JSON.stringify(updateTeamError, null, 2));
 			throw updateTeamError;
+		}
+
+		// If no rows were updated, payment was already processed (handles concurrent requests safely)
+		if (!updatedTeam || updatedTeam.length === 0) {
+			console.warn('No team rows updated; payment likely already completed. Skipping registrations insert.');
+			return res.status(409).json({
+				success: false,
+				message: 'Payment already verified for this team',
+			});
 		}
 
 		console.log('Team updated successfully');
@@ -224,6 +236,7 @@ router.post('/verify-payment', async (req, res) => {
 			phone: member.phone,
 			college: member.college,
 			role: member.role,
+			roll_number: member.rollNumber || member.roll_number
 		}));
 
 		console.log('Preparing to insert members:', {
@@ -244,6 +257,15 @@ router.post('/verify-payment', async (req, res) => {
 
 		if (membersInsertError) {
 			console.error('Members Insert Error:', JSON.stringify(membersInsertError, null, 2));
+			// Handle unique violations (e.g., duplicate roll_number)
+			const errorMessage = (membersInsertError && membersInsertError.message) || '';
+			if (errorMessage.includes('duplicate key value') || errorMessage.includes('unique')) {
+				return res.status(409).json({
+					success: false,
+					message: 'Some registrations already exist (unique constraint)',
+					details: process.env.NODE_ENV === 'development' ? errorMessage : undefined,
+				});
+			}
 			throw membersInsertError;
 		}
 

@@ -69,8 +69,13 @@ router.post('/', async (req, res) => {
 
     // Validate each member
     const emails = new Set();
+    const rollNumbers = new Set();
     for (let i = 0; i < members.length; i++) {
       const member = members[i];
+      // Normalize rollNumber to camelCase for validation logic
+      if (!member.rollNumber && member.roll_number) {
+        member.rollNumber = member.roll_number;
+      }
       const memberNum = i + 1;
 
       // Check for duplicate emails in the request
@@ -82,8 +87,8 @@ router.post('/', async (req, res) => {
       }
       emails.add(member.email);
 
-      // Validate required fields for each member
-      const requiredFields = ['name', 'email', 'phone', 'college', 'role'];
+      // Validate required fields for each member (rollNumber required)
+      const requiredFields = ['name', 'email', 'phone', 'college', 'role', 'rollNumber'];
       const missingFields = requiredFields.filter(field => !member[field]);
       
       if (missingFields.length > 0) {
@@ -100,6 +105,15 @@ router.post('/', async (req, res) => {
           message: `Invalid role for member ${memberNum}. Must be 'Team Lead' or 'Member'`,
         });
       }
+
+      // Check duplicate roll numbers within the same request
+      if (rollNumbers.has(member.rollNumber)) {
+        return res.status(400).json({
+          success: false,
+          message: `Duplicate roll number found in request: ${member.rollNumber}`,
+        });
+      }
+      rollNumbers.add(member.rollNumber);
     }
 
     // Check if team name already exists
